@@ -1,6 +1,18 @@
-Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
-Make sure that the name of the files match with the following:
-- Top:        multiply_fp32.sv
+Complete the partial SystemVerilog RTL in sources/multiply_fp32.sv according to doc/spec.md.
+The implementation must be synthesizable and pass the Cocotb/Icarus Verilog tests.
 
+Naming (do not change):
+- File:  sources/multiply_fp32.sv
+- Module: fmultiplier
 
-**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$
+Requirements:
+- Keep the port list and handshake exactly as specified (clk, rst, valid, a, b, z, out_valid).
+- Implement the 7-stage FSM described in the spec (valid → out_valid in 7 cycles).
+- Support normal FP32 multiply with round-to-nearest-even (RNE).
+- Implement the special-case rules in the spec (NaN, infinity, zero, subnormal handling).
+- Do not change doc/spec.md or the test files.
+
+Tooling constraints (Icarus Verilog):
+- Avoid SystemVerilog Assertion (SVA) property/sequence syntax.
+- Avoid constructs that Icarus or synthesis tools commonly reject (e.g. delays, unsynthesizable system tasks).
+- Prefer a single clocked always block for the FSM, matching the existing skeleton style.
