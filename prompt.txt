@@ -1,12 +1,18 @@
-Complete the partial SystemVerilog in sources/multiply_fp32.sv to implement module fmultiplier per doc/spec.md.
+Complete the partial SystemVerilog RTL in sources/multiply_fp32.sv according to doc/spec.md.
+The implementation must be synthesizable and pass the Cocotb/Icarus Verilog tests.
 
-Hard requirements:
-- Do NOT change the port list (clk, rst, valid, a, b, z, out_valid).
-- File: sources/multiply_fp32.sv | Module: fmultiplier
-- Synthesizable RTL; single multi-cycle FSM (7 stages, counter 1..7).
-- Drive out_valid and z every clock after reset (default out_valid=0; one-cycle pulse on completion).
-- Normal FP32 multiply with round-to-nearest-even.
+Naming (do not change):
+- File:  sources/multiply_fp32.sv
+- Module: fmultiplier
 
-Write your own cocotb/pytest tests to verify correctness before submitting. Use the walkthrough in the spec (1.5 × 2.0 → 3.0) as a first sanity check.
+Requirements:
+- Keep the port list and handshake exactly as specified (clk, rst, valid, a, b, z, out_valid).
+- Implement the 7-stage FSM described in the spec (valid → out_valid in 7 cycles).
+- Support normal FP32 multiply with round-to-nearest-even (RNE).
+- Implement the special-case rules in the spec (NaN, infinity, zero, subnormal handling).
+- Do not change doc/spec.md or the test files.
 
-Icarus Verilog is the simulator — no SVA, no #delays in RTL.
+Tooling constraints (Icarus Verilog):
+- Avoid SystemVerilog Assertion (SVA) property/sequence syntax.
+- Avoid constructs that Icarus or synthesis tools commonly reject (e.g. delays, unsynthesizable system tasks).
+- Prefer a single clocked always block for the FSM, matching the existing skeleton style.

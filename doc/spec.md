@@ -1,225 +1,200 @@
-# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle)
+# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
 
-## What you are building
+## Overview
+`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier that accepts one operation at a time using a **valid/out_valid** handshake. Internally it runs a staged pipeline controlled by a small FSM (`counter`) and produces a 32-bit IEEE-754 binary32 result.
 
-Complete module **`fmultiplier`** in **`sources/multiply_fp32.sv`**.
+This design targets:
+- **Round-to-nearest-even (RNE)** for the normal multiply path,
+- Deterministic latency (fixed number of cycles from `valid` to `out_valid`),
+- Operand classification and dedicated handling for **NaN, infinity, zero, subnormal, and normal** inputs,
+- Behavior: `z = a * b` where `a`, `b`, and `z` are single-precision IEEE-754 binary32 values.
 
-- Multi-cycle IEEE-754 **binary32** multiplier: `z = a * b`
-- **Valid / out_valid** handshake (one operation at a time)
-- **7-cycle** fixed latency from accepted `valid` to `out_valid`
-- **Round-to-nearest-even (RNE)** on the normal-number path
-- **Synthesizable** SystemVerilog; graded with **Icarus Verilog** + cocotb
-
-**Do not change the module port list.**
-
----
-
-## What grading checks
-
-The hidden testbench runs **100 random multiplies** and checks **bit-exact** agreement with Python IEEE-754 float math (RNE).
-
-| Required | Not required for pass |
-|----------|----------------------|
-| Normal operands only (biased exponent **1..254**) | NaN, infinity, zero operands |
-| Bit-exact `z` vs reference | Subnormal **results** (those cases are skipped) |
-| `out_valid` pulses once when `z` is valid | Back-to-back pipelined throughput |
-| Async active-high reset | |
-
-If `out_valid` or `z` are ever undriven (`X` in simulation), grading fails immediately — usually on the first multiply.
+The normal-number path is intended to be bit-accurate against IEEE-754 binary32 multiply with RNE. Special-value results follow the rules in [Special-case results](#special-case-results) below (not full IEEE payload propagation).
 
 ---
 
-## Ports
+## Interface
 
+### Ports
 | Port | Dir | Width | Description |
 |------|-----|-------|-------------|
-| `clk` | in | 1 | Clock |
-| `rst` | in | 1 | Async reset (**posedge**, active high) |
-| `valid` | in | 1 | 1-cycle start pulse (accepted only when idle) |
-| `a` | in | 32 | Operand A (FP32 bits) |
-| `b` | in | 32 | Operand B (FP32 bits) |
-| `z` | out | 32 | Result (FP32 bits) |
-| `out_valid` | out | 1 | 1-cycle pulse when `z` is updated |
+| `clk`   | in | 1 | Clock |
+| `rst`   | in | 1 | Async reset (posedge) |
+| `valid` | in | 1 | **1-cycle start pulse**; accepted only when not busy |
+| `a`     | in | 32 | Operand A (FP32 bits) |
+| `b`     | in | 32 | Operand B (FP32 bits) |
+| `z`         | out | 32 | Result (FP32 bits) |
+| `out_valid` | out | 1 | **1-cycle pulse** when `z` is updated/valid |
+
+### Reset behavior
+On `rst`:
+- `busy = 0`, `counter = 0`, `out_valid = 0`, `z = 0`
+- Internal operand/result registers are cleared
+
+### Handshake contract
+- When `busy == 0`, a high `valid` on a rising edge **starts** an operation:
+  - `a` and `b` are **registered** into internal regs `a_r` and `b_r`.
+  - The FSM begins at `counter = 1`.
+- While `busy == 1`, new `valid` pulses are **ignored**.
+- When the operation completes:
+  - `z` is updated,
+  - `out_valid` pulses high for 1 clock cycle,
+  - `busy` is cleared.
+- `out_valid` is held low on all cycles except the completion cycle.
 
 ---
 
-## Critical rules (read before coding)
+## Latency and Throughput
 
-1. **Drive outputs every cycle.** After reset, assign `out_valid <= 0` by default each clock. Only pulse `out_valid <= 1` on the completion cycle. Never leave `z` or `out_valid` undriven.
+### Latency
+- Fixed latency of **7 stages**.
+- In this implementation the operation begins at stage `counter = 1` and completes at `counter = 7`.
+- `out_valid` asserts on the cycle where stage 7 packing finishes.
 
-2. **One FSM always block** — `always @(posedge clk or posedge rst)` with a `case (counter)` for stages 1..7.
+A safe expectation for system-level timing is:
+- **`out_valid` occurs 7 clock cycles after the start edge** (the clock edge where `valid` was sampled when idle).
 
-3. **Start only when idle.** If `!busy && valid` on a posedge: latch `a`/`b` into `a_r`/`b_r`, set `busy <= 1`, set `counter <= 1`. Ignore `valid` while `busy`.
-
-4. **Finish on stage 7.** Update `z`, assert `out_valid` for one cycle, clear `busy`.
-
-5. **Use registered operands** (`a_r`, `b_r`) for all unpack/math — not the live `a`/`b` inputs after the start cycle.
-
-### Recommended always-block shape
-
-```verilog
-always @(posedge clk or posedge rst) begin
-    if (rst) begin
-        // reset busy, counter, out_valid, z, internal regs
-    end else begin
-        out_valid <= 1'b0;          // DEFAULT every cycle — do not skip this
-        if (!busy) begin
-            if (valid) begin /* latch a,b; busy<=1; counter<=1 */ end
-        end else begin
-            case (counter)
-                3'd1: /* stage 1 */ ;
-                // ... stages 2..7 ...
-            endcase
-        end
-    end
-end
-```
+### Throughput
+- **Not pipelined** (single-issue).
+- Max throughput is **1 result per 7 cycles** (assuming `valid` is asserted only when idle).
 
 ---
 
-## FSM timing (do not get this wrong)
+## Internal Data Model (IEEE-754 binary32)
 
-Let **cycle 0** = the posedge where `valid==1` and `busy==0` (operands latched, `counter` becomes 1, `busy` becomes 1). **Stage 1 does not run on cycle 0** — it runs on the next posedge.
+### Operand field layout
+For each operand:
+- `sign` = bit 31
+- `exp`  = bits 30:23 (biased exponent)
+- `mant` = bits 22:0 (fraction)
 
-| Cycle | What happens |
-|-------|----------------|
-| 0 | Latch `a`,`b`; `busy=1`; `counter=1` |
-| 1 | Run stage 1 → `counter=2` |
-| 2 | Run stage 2 → `counter=3` |
-| 3 | Run stage 3 → `counter=4` |
-| 4 | Run stage 4 → `counter=5` |
-| 5 | Run stage 5 → `counter=6` |
-| 6 | Run stage 6 → `counter=7` |
-| 7 | Run stage 7: update `z`, `out_valid=1`, `busy=0` |
+### Operand classification (from registered operands `a_r`, `b_r`)
+| Predicate | Condition |
+|-----------|-----------|
+| `a_is_nan` / `b_is_nan` | `exp == 8'hFF` and `mant != 0` |
+| `a_is_inf` / `b_is_inf` | `exp == 8'hFF` and `mant == 0` |
+| `a_is_zero` / `b_is_zero` | `exp == 8'h00` and `mant == 0` |
+| Subnormal (implicit) | `exp == 8'h00` and `mant != 0` |
 
-**`out_valid` must go high on cycle 7** (7 posedges after the start edge).
-
----
-
-## Suggested internal state
-
-| Signal | Role |
-|--------|------|
-| `busy` | Operation in progress |
-| `counter` | Stage index 1..7 |
-| `a_r`, `b_r` | Registered operands |
-| `a_s`, `b_s`, `z_s` | Sign bits |
-| `a_e`, `b_e`, `z_e` | **Unbiased** signed exponents (10-bit; use `$signed` when comparing) |
-| `a_m`, `b_m`, `z_m` | 24-bit mantissa path (hidden bit at bit 23) |
-| `product` | Wide mantissa product (50 bits is enough) |
-| `guard_bit`, `round_bit`, `sticky` | RNE helper bits |
+### Internal signals
+- `busy`: operation in progress
+- `counter`: FSM stage number (1..7 while busy)
+- `a_r`, `b_r`: registered input operands
+- `a_s`, `b_s`, `z_s`: sign bits
+- `a_e`, `b_e`, `z_e`: signed exponent in *unbiased* domain (10-bit regs, used with `$signed`)
+- `a_m`, `b_m`, `z_m`: 24-bit mantissa path (hidden bit inserted when applicable)
+- `product`: 50-bit scaled mantissa product
+- `guard_bit`, `round_bit`, `sticky`: rounding support bits for RNE
+- `special_case`: latch indicating the result is taken from the special path
+- `special_z`: precomputed special-case result
 
 ---
 
-## FP32 field layout
+## FSM / Pipeline Stages
 
-For a 32-bit word: `sign = [31]`, `exp = [30:23]` (biased), `frac = [22:0]`.
+The FSM is controlled by:
+- `busy` (operation in progress)
+- `counter` (stage number 1..7)
 
-**Normal number** (what grading uses): `exp` is 1..254. Value = `(-1)^sign × 1.fraction × 2^(exp-127)`.
-
----
-
-## Seven pipeline stages (normal path only)
-
-You may **ignore NaN / Inf / zero / subnormal operands** — grading uses normal numbers only.
+All stage actions are performed inside a single sequential always block using `case(counter)`.
 
 ### Stage 1 — Unpack
-From `a_r`, `b_r`:
-- `a_s`, `b_s` ← sign bits
-- `a_e`, `b_e` ← unbiased exponent: `{exp} - 127` (signed)
-- `a_m`, `b_m` ← `{1'b0, frac}` (24 bits; hidden bit **not** set yet)
+- Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
+- Convert biased exponent into unbiased form: `exp - 127`.
+- Capture signs.
 
-### Stage 2 — Hidden one
-For normal inputs: `a_m[23] <= 1`, `b_m[23] <= 1`.
+### Stage 2 — Special classification + denormal setup
+Checks operand classes using `a_is_nan`, `a_is_inf`, `a_is_zero`, etc. (derived from `a_r` / `b_r`).
 
-### Stage 3 — Input align
-For normal inputs: **no-op** (mantissa MSB is already 1). Advance counter.
+If a special case applies, sets `special_case = 1` and latches `special_z` (see [Special-case results](#special-case-results)). The normal multiply path is skipped for later stages.
 
-### Stage 4 — Multiply
-- `z_s <= a_s ^ b_s`
-- `z_e <= a_e + b_e + 1`  (the `+1` accounts for the hidden ones)
-- `product <= a_m * b_m * 4`  (scale by 4 so later bit slices line up)
+For the normal path (no special case):
+- If exponent is nonzero: set implicit leading 1 (`a_m[23] = 1` / `b_m[23] = 1`).
+- If exponent is zero (subnormal): force unbiased exponent to `-126` (subnormal exponent baseline) and leave the hidden bit clear.
 
-### Stage 5 — Split product into mantissa + G/R/S
-After the `×4` scaling, extract:
-- `z_m`       ← `product[49:26]`  (24-bit working mantissa)
-- `guard_bit` ← `product[25]`
-- `round_bit` ← `product[24]`
-- `sticky`    ← OR of `product[23:0]` (any remaining low bits)
+### Stage 3 — Input normalization (lightweight)
+- Skipped when `special_case` is set.
+- If mantissa MSB is not set, shift left once and decrement exponent.
+- Used to align subnormal mantissas before multiply; typically a no-op for normal operands.
 
-### Stage 6 — Normalize (if needed) + RNE
-**Normalize:** if `z_m[23]==0`, left-shift mantissa once, decrement `z_e`, shift G into LSB of mantissa, advance G←R, R←0.
+### Stage 4 — Multiply core
+- Skipped when `special_case` is set.
+- Compute result sign: `z_s = a_s ^ b_s`
+- Exponent add: `z_e = a_e + b_e + 1`
+- Mantissa product: `product = a_m * b_m * 4`
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
 
-**RNE increment** when `guard_bit==1` **and** `(round_bit | sticky | z_m[0])`:
-- Add 1 to mantissa
-- If carry overflows bit 23: set mantissa to `24'h800000` and increment `z_e`
+### Stage 5 — Extract mantissa + rounding bits
+- Skipped when `special_case` is set.
+- `z_m = product[49:26]`
+- `guard_bit = product[25]`
+- `round_bit = product[24]`
+- `sticky = OR(product[23:0])`
 
-Stage 6 is easiest with **blocking temporaries** inside the clocked always block (Icarus-friendly).
+### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
+Skipped when `special_case` is set. Otherwise performs:
+1. **Underflow alignment** toward exponent `-126`:
+   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
+   - Shifts mantissa right and accumulates shifted-out bits into `sticky`.
+2. **Normalize** if MSB missing:
+   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
+3. **RNE rounding**:
+   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
+   - Handles carry-out from rounding:
+     - If rounding overflows mantissa, set mantissa to `0x800000` and increment exponent.
 
-### Stage 7 — Pack + handshake
-- `z[31] <= z_s`
-- `z[30:23] <= z_e[7:0] + 127`  (re-bias exponent)
-- `z[22:0] <= z_m[22:0]`  (drop hidden bit)
-- If `$signed(z_e) > 127`: output signed infinity (`exp=8'hFF`, `frac=0`)
-- `out_valid <= 1`, `busy <= 0`
-
----
-
-## Walkthrough: `1.5 × 2.0 = 3.0`
-
-Use this to sanity-check your pipeline (normal-path only):
-
-| Step | Value |
-|------|-------|
-| `a = 0x3FC00000` | 1.5 — sign 0, biased exp 127, frac = 0.5 |
-| `b = 0x40000000` | 2.0 — sign 0, biased exp 128, frac = 0 |
-| After unpack | `a_e=0`, `b_e=1`; `a_m=1.1₂`, `b_m=1.0₂` (with hidden bit at [23]) |
-| After multiply stage | `z_e = 0+1+1 = 2`; mantissa product scaled by 4 |
-| After pack | `z = 0x40400000` (3.0) |
-
-If your design does not produce `0x40400000` for these inputs (after 7 cycles), debug unpack, hidden bit, exponent add, or pack first.
+### Stage 7 — Pack
+- If `special_case`: `z <= special_z`.
+- Otherwise (normal path):
+  - Pack sign, biased exponent (`z_e + 127`), and fraction `z_m[22:0]`.
+  - If `z_e == -126` and `z_m[23] == 0`: force exponent field to `0` (denormal/zero encoding).
+  - If `z_e > 127`: output signed infinity (`sign = z_s`, `exp = 0xFF`, `mant = 0`).
+- Asserts `out_valid` for one cycle and clears `busy`.
 
 ---
 
-## Reset
+## Special-case results
 
-On `posedge rst`: `busy=0`, `counter=0`, `out_valid=0`, `z=0`, clear internal regs.
+Evaluated in stage 2 (priority order):
 
----
+| Condition | Result (`special_z`) |
+|-----------|----------------------|
+| `a` or `b` is NaN | `32'h7FC0_0000` (canonical quiet NaN, sign = 0) |
+| `a` is Inf and `b` is zero, or `b` is Inf and `a` is zero | `32'h7FC0_0000` (invalid, quiet NaN) |
+| `a` is Inf (and `b` is not zero/NaN) | `{a_s ^ b_s, 8'hFF, 23'd0}` (signed infinity) |
+| `b` is Inf (and `a` is not zero/NaN) | `{a_s ^ b_s, 8'hFF, 23'd0}` (signed infinity) |
+| `a` or `b` is zero (and not caught above) | `{a_s ^ b_s, 8'd0, 23'd0}` (signed zero) |
 
-## Common mistakes
-
-- [ ] `out_valid` or `z` left at `X` — only assigned in stage 7, no default each cycle
-- [ ] Latency off by one (6 stages, or `out_valid` on cycle 6)
-- [ ] Forgot hidden bit before multiply (`a_m[23]` and `b_m[23]` must be 1)
-- [ ] Used live `a`/`b` instead of `a_r`/`b_r` after the start cycle
-- [ ] Wrong exponent: subtract 127 on unpack, add 127 on pack
-- [ ] Missing `* 4` on product or wrong G/R/S bit indices
-- [ ] RNE ties broken wrong (need LSB check for round-to-even)
-- [ ] Wasted effort on NaN/Inf/zero — not needed for grading
-- [ ] SVA or `#delay` in RTL — Icarus will reject or mis-simulate
-
----
-
-## Self-check
-
-Write your own cocotb/pytest testbench. Compare `z` against Python:
-
-```python
-import struct
-def mul_bits(a, b):
-    fa = struct.unpack('<f', struct.pack('<I', a))[0]
-    fb = struct.unpack('<f', struct.pack('<I', b))[0]
-    return struct.unpack('<I', struct.pack('<f', fa * fb))[0]
-```
-
-Test normal operands with biased exponent 1..254. Pulse `valid` when idle; wait for `out_valid`; sample `z` on that cycle.
+Notes:
+- NaN payload bits from operands are **not** propagated; all NaN results use `0x7FC00000`.
+- Signaling NaN is not distinguished from quiet NaN.
+- `Inf × Inf` yields signed infinity (sign = `a_s ^ b_s`).
 
 ---
 
-## Tooling constraints
+## Supported input classes
 
-- Simulator: **Icarus Verilog** (`iverilog` / `vvp`)
-- No SVA (property/sequence) syntax
-- No `#delay` in synthesizable logic
-- Module name: **`fmultiplier`**; file: **`sources/multiply_fp32.sv`**
+| Class | Supported | Path |
+|-------|-----------|------|
+| Normal (`exp` in `1..254`) | Yes | Stages 1–7 normal multiply + RNE |
+| Subnormal (`exp = 0`, `mant ≠ 0`) | Yes | Hidden-bit setup, input normalize, normal multiply path |
+| Zero (`exp = 0`, `mant = 0`) | Yes | Special-case signed zero |
+| Infinity (`exp = 0xFF`, `mant = 0`) | Yes | Special-case signed infinity (or NaN if multiplied by zero) |
+| NaN (`exp = 0xFF`, `mant ≠ 0`) | Yes | Special-case canonical quiet NaN |
+
+---
+
+## Assumptions & Limitations
+- Single outstanding operation (`busy` ignores back-to-back `valid` while busy).
+- Not a pipelined multiplier; one multiply every 7+ cycles.
+- Special NaN handling is simplified (fixed quiet NaN output, no payload preservation).
+- Subnormal **results** rely on the stage 6 underflow shift and stage 7 denormal pack logic; extreme tininess may differ from a reference soft-float in corner cases.
+
+---
+
+## Verification Notes
+Recommended testbench behavior for this handshake design:
+- Drive `a` / `b` and pulse `valid` **synchronously** on clock edges.
+- Wait for `out_valid` before sampling `z`.
+- Compare normal operands against a reference model (e.g. Python `struct` / `float` or soft-float) with RNE.
+- Add directed tests for NaN, ±Inf, ±0, subnormals, overflow-to-inf, and `Inf × 0 → NaN`.
