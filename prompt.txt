@@ -1,6 +1,12 @@
-Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
-Make sure that the name of the files match with the following:
-- Top:        multiply_fp32.sv
+Complete the partial SystemVerilog in sources/multiply_fp32.sv to implement module fmultiplier per doc/spec.md.
 
+Hard requirements:
+- Do NOT change the port list (clk, rst, valid, a, b, z, out_valid).
+- File: sources/multiply_fp32.sv | Module: fmultiplier
+- Synthesizable RTL; single multi-cycle FSM (7 stages, counter 1..7).
+- Drive out_valid and z every clock after reset (default out_valid=0; one-cycle pulse on completion).
+- Normal FP32 multiply with round-to-nearest-even.
 
-**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$
+Write your own cocotb/pytest tests to verify correctness before submitting. Use the walkthrough in the spec (1.5 × 2.0 → 3.0) as a first sanity check.
+
+Icarus Verilog is the simulator — no SVA, no #delays in RTL.
