@@ -13,6 +13,33 @@ The normal-number path is intended to be bit-accurate against IEEE-754 binary32 
 
 ---
 
+## Critical Implementation Notes
+
+Before writing any logic, read these — they are the most common causes of test failure:
+
+1. **`out_valid` must always be driven.** Declare it as `reg` and assign `out_valid <= 0` as the default in every clock cycle. Only set `out_valid <= 1` at stage 7 (counter == 7). Leaving `out_valid` unassigned causes it to stay `X`, which fails the test immediately.
+2. **`z` must also be driven every cycle.** Use a default `z <= z` or `z <= 0` before the case statement.
+3. **Test your implementation yourself.** Run `cat tests/test_multiply_fp32.py` to see the testbench, then write your own Icarus Verilog test to confirm `out_valid` pulses at cycle 7 before considering the task complete.
+4. **Minimal working skeleton:**
+   ```verilog
+   always @(posedge clk) begin
+     out_valid <= 0;  // default every cycle — REQUIRED
+     if (rst) begin
+       busy <= 0; counter <= 0; z <= 0;
+     end else if (!busy && valid) begin
+       busy <= 1; counter <= 1; a_r <= a; b_r <= b;
+     end else if (busy) begin
+       counter <= counter + 1;
+       case (counter)
+         // stages 1–6: computation here
+         7: begin z <= packed_result; out_valid <= 1; busy <= 0; counter <= 0; end
+       endcase
+     end
+   end
+   ```
+
+---
+
 ## Interface
 
 ### Ports
