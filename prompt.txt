@@ -1,18 +1,19 @@
-Complete the partial SystemVerilog RTL in sources/multiply_fp32.sv according to doc/spec.md.
-The implementation must be synthesizable and pass the Cocotb/Icarus Verilog tests.
+Implement sources/multiply_fp32.sv (module fmultiplier) according to doc/spec.md.
 
-Naming (do not change):
-- File:  sources/multiply_fp32.sv
-- Module: fmultiplier
+WORKFLOW — follow these steps in order and do not stop early:
 
-Requirements:
-- Keep the port list and handshake exactly as specified (clk, rst, valid, a, b, z, out_valid).
-- Implement the 7-stage FSM described in the spec (valid → out_valid in 7 cycles).
-- Support normal FP32 multiply with round-to-nearest-even (RNE).
-- Implement the special-case rules in the spec (NaN, infinity, zero, subnormal handling).
-- Do not change doc/spec.md or the test files.
+1. Read doc/spec.md fully, especially the "Critical Implementation Notes" section.
+2. Read sources/multiply_fp32.sv to see the existing port declarations.
+3. Write a complete implementation. CRITICAL: inside the always block, write
+   `out_valid <= 0;` as the VERY FIRST line (default every cycle). Only raise it
+   to 1 at stage 7. If out_valid is ever left unassigned the test fails immediately.
+4. After writing, run the tests:
+      cd /home/ubuntu/example-verilog-codebase
+      python -m pytest tests/ -v 2>&1 | tail -40
+5. Read the failure output carefully. Fix every error. Repeat step 4 until you see
+   "1 passed" or "PASS=1 FAIL=0".
+6. Only stop when the test passes.
 
-Tooling constraints (Icarus Verilog):
-- Avoid SystemVerilog Assertion (SVA) property/sequence syntax.
-- Avoid constructs that Icarus or synthesis tools commonly reject (e.g. delays, unsynthesizable system tasks).
-- Prefer a single clocked always block for the FSM, matching the existing skeleton style.
+Naming (do not change): File = sources/multiply_fp32.sv, Module = fmultiplier.
+Ports (do not change): clk, rst, valid, a[31:0], b[31:0], z[31:0], out_valid.
+Tooling: Icarus Verilog / Cocotb. No SVA syntax. Single clocked always block for FSM.
